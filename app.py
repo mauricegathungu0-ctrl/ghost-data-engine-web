@@ -23,7 +23,9 @@ if uploaded_file is not None:
     
     if st.button("Run Reconstruction"):
         # Placeholder repair logic (e.g., filling missing spots)
-        repaired_df = df.interpolate(method='linear', numeric_only=True).fillna(0)
+        repaired_df = df.copy()
+        numeric_cols = repaired_df.select_dtypes(include='number').columns
+        repaired_df[numeric_cols] = repaired_df[numeric_cols].interpolate(method='linear').fillna(0)
         
         st.success("Reconstruction Complete!")
         st.subheader("✨ Repaired Output Preview")
