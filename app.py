@@ -17,7 +17,7 @@ st.sidebar.info(
 uploaded_file = st.file_uploader("Upload a CSV file with ngng/corrupted data", type=["csv"])
 
 if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
+    df = pd.read_csv(uploaded_file, on_bad_lines='skip')
     st.subheader("📊 Corrupted Input Preview")
     st.dataframe(df)
     
