@@ -14,7 +14,7 @@ st.sidebar.info(
 )
 
 # File upload section
-uploaded_file = st.file_uploader("Upload a CSV file with missing/corrupted data", type=["csv"])
+uploaded_file = st.file_uploader("Upload a CSV file with ngng/corrupted data", type=["csv"])
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
@@ -23,7 +23,7 @@ if uploaded_file is not None:
     
     if st.button("Run Reconstruction"):
         # Placeholder repair logic (e.g., filling missing spots)
-        repaired_df = df.fillna(0)
+        repaired_df = df.interpolate(method='linear', numeric_only=True).fillna(0)
         
         st.success("Reconstruction Complete!")
         st.subheader("✨ Repaired Output Preview")
