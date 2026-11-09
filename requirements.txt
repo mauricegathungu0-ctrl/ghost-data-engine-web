@@ -1,4 +1,5 @@
-streamlit>=1.30
+streamlit>=1.50
 numpy>=1.24
-pandas>=2.0
+pandas>=2.1
 matplotlib>=3.7
+jinja2>=3.1

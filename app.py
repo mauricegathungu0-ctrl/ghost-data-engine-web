@@ -3,6 +3,8 @@
 Run locally:   streamlit run app.py
 The engine itself is pure Python; this file only provides the interface.
 """
+import contextlib
+import hashlib
 import io
 
 import matplotlib
@@ -17,8 +19,14 @@ from generator import SHAPE_BUILDERS
 
 st.set_page_config(page_title="Ghost Data Engine", page_icon="👻", layout="wide")
 
+# ---- dark plots to match the dark theme ------------------------------------
+BG, FG = "#0e1117", "#fafafa"
+plt.rcParams.update({"figure.facecolor": BG, "axes.facecolor": BG, "savefig.facecolor": BG,
+                     "text.color": FG, "axes.labelcolor": FG, "xtick.color": FG, "ytick.color": FG,
+                     "axes.edgecolor": "#3a3f4b"})
 CMAP = plt.get_cmap("viridis").copy()
-CMAP.set_bad("#d9d9d9")
+CMAP.set_bad("#3a3f4b")
+FILL_CSS = "background-color: rgba(46, 160, 67, 0.28);"
 
 
 def heat(ax, m, title, vmin=None, vmax=None):
@@ -37,6 +45,117 @@ def show_summary(s):
     c4.metric("Mean confidence (heuristic)", s["mean_confidence"])
 
 
+MISS_CSS = "background-color: rgba(255, 75, 75, 0.30);"
+
+
+def preview(df, filled):
+    """Repaired Output Preview table; reconstructed cells are tinted green, leftovers show None."""
+    styled = (df.style.apply(lambda _d: filled.map(lambda b: FILL_CSS if b else ""), axis=None)
+              .format(na_rep="None"))
+    st.dataframe(styled, width="stretch")
+
+
+def scan_preview(df, missing):
+    """Scanned Data table: every value as read, missing cells shown as None and tinted red."""
+    styled = (df.style.apply(lambda _d: missing.map(lambda b: MISS_CSS if b else ""), axis=None)
+              .format(na_rep="None"))
+    st.dataframe(styled, width="stretch")
+
+
+def _check_size(cells, label):
+    limit = core.MAX_TABLE_CELLS if label == "table" else core.MAX_CELLS_2D
+    if cells > limit:
+        raise ValueError(f"This {label} has {cells} cells. The hosted app is limited to {limit} cells; "
+                         "use the command line version for larger files.")
+
+
+@st.cache_data(show_spinner="Scanning file...", max_entries=16)
+def scan_table(data, delim):
+    df, numeric = core.read_table(data, delim)
+    _check_size(len(df) * max(1, len(numeric)), "table")
+    if not numeric:
+        raise ValueError("No numeric columns were found to repair.")
+    missing = pd.DataFrame(False, index=df.index, columns=df.columns)
+    missing[numeric] = df[numeric].isna()
+    return df, missing
+
+
+@st.cache_data(show_spinner="Scanning file...", max_entries=16)
+def scan_grid(data, delim, header):
+    if header:
+        data = data.split(b"\n", 1)[1] if b"\n" in data else b""
+    grid, w, h = core.load_grid_from_bytes(data, delim)
+    _check_size(w * h, "grid")
+    if not grid:
+        raise ValueError("No numeric values found. Check the delimiter and the header option.")
+    df = pd.DataFrame(core.grid_to_matrix(grid, w, h), columns=[f"col_{i + 1}" for i in range(w)])
+    return df, df.isna()
+
+
+# ---- cached engine runs (Streamlit re-runs the whole script on every click) ----
+@st.cache_data(show_spinner="Reconstructing...", max_entries=16)
+def run_table(data, delim, decay):
+    df, numeric = core.read_table(data, delim)
+    if len(df) * max(1, len(numeric)) > core.MAX_TABLE_CELLS:
+        raise ValueError(f"This table has {len(df)} rows x {len(numeric)} numeric columns. The hosted app "
+                         f"is limited to {core.MAX_TABLE_CELLS} cells; use the command line for larger files.")
+    if not numeric:
+        raise ValueError("No numeric columns were found to repair.")
+    res = core.repair_table(df, numeric, decay)
+    res["numeric_cols"] = numeric
+    return res
+
+
+@st.cache_data(show_spinner="Reconstructing...", max_entries=16)
+def run_grid(data, delim, header, conn, decay, blend):
+    if header:
+        data = data.split(b"\n", 1)[1] if b"\n" in data else b""
+    grid, w, h = core.load_grid_from_bytes(data, delim)
+    if w * h > core.MAX_CELLS_2D:
+        raise ValueError(f"This grid is {w}x{h} = {w * h} cells. The hosted app is limited to "
+                         f"{core.MAX_CELLS_2D} cells. Use the command line version for larger files.")
+    if not grid:
+        raise ValueError("No numeric values found. Check the delimiter and the header option.")
+    res = core.repair_matrix(grid, w, h, conn, decay, blend)
+    res["w"], res["h"] = w, h
+    if res["report"] is not None:
+        res["audit"] = core.audit_rows(res["report"], w, h)
+    return res
+
+
+@st.cache_data(show_spinner="Running 2D demo...", max_entries=8)
+def demo_2d(*args):
+    return core.run_demo_2d(*args)
+
+
+@st.cache_data(show_spinner="Running space-time demo...", max_entries=8)
+def demo_3d(*args):
+    return core.run_demo_3d(*args)
+
+
+@st.cache_data(show_spinner="Running calibration...", max_entries=4)
+def calibration(*args):
+    return core.run_calibration(*args)
+
+
+@st.cache_data(show_spinner="Running benchmark...", max_entries=4)
+def synthetic_benchmark(size, frac):
+    from benchmark import run_benchmark
+    with contextlib.redirect_stdout(io.StringIO()):
+        return run_benchmark(width=size, height=size, missing_fraction=frac, seed=7)
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+st.sidebar.header("Architecture Note")
+st.sidebar.info(
+    "**Open Core / Public Demo**\n\n"
+    "This public demo runs the real Ghost Data Engine directly: pure-Python, tension-weighted "
+    "multi-wave reconstruction with optional post-fill blends. Every filled cell has an audit row. "
+    "File size limits keep the hosted app responsive; use the command line for larger files."
+)
+
 # ---------------------------------------------------------------------------
 st.title("👻 Ghost Data Engine")
 st.caption("Auditable gap filling for gridded data. Pure-Python engine; every filled cell has an audit row. "
@@ -49,62 +168,115 @@ tab_csv, tab_2d, tab_3d, tab_bench, tab_about = st.tabs(
 # Tab 1: repair an uploaded CSV
 # ---------------------------------------------------------------------------
 with tab_csv:
-    st.subheader("Repair a CSV matrix")
-    st.write("Upload a numeric CSV grid. Empty cells and the words `nan`, `null`, `missing`, `bad`, `gap`, "
-             "`-999` are treated as gaps. Recorded cells are never changed.")
+    st.subheader("Repair a CSV")
+    st.write("Upload a CSV. Empty cells and the words `nan`, `null`, `missing`, `bad`, `gap`, `-999` are "
+             "treated as gaps. Recorded cells and text columns are never changed.")
     left, right = st.columns([2, 1])
-    with right:
-        conn = st.radio("Void connectivity", [4, 8], horizontal=True, key="csv_conn")
-        decay = st.select_slider("Inward decay", options=[1.0, 0.95, 0.85], value=1.0, key="csv_decay")
-        blend = st.checkbox("Post-fill blend (recommended)", value=True, key="csv_blend")
-        header = st.checkbox("First row is a header (skip it)", value=False)
-        delim = st.selectbox("Delimiter", [",", ";", "\t"], format_func=lambda d: {",": "comma", ";": "semicolon", "\t": "tab"}[d])
     with left:
         up = st.file_uploader("CSV file", type=["csv", "txt"])
-        use_sample = st.checkbox("Use the built-in sample instead", value=(up is None))
+        use_sample = st.checkbox("Use the built-in sample", value=False, key="csv_sample",
+                                 help="Used only while no file is uploaded.")
+    with right:
+        delim = st.selectbox("Delimiter", [",", ";", "\t"],
+                             format_func=lambda d: {",": "comma", ";": "semicolon", "\t": "tab"}[d])
 
-    data = None
-    if up is not None and not use_sample:
-        data = up.getvalue()
+    data, source = None, None
+    if up is not None:
+        data, source = up.getvalue(), up.name
     elif use_sample:
-        data = core.sample_csv_text().encode()
+        source = "sample"
 
-    if data is not None:
-        if header:
-            data = data.split(b"\n", 1)[1] if b"\n" in data else b""
+    if source is None:
+        st.info("Upload a CSV, or tick **Use the built-in sample**. The scanned data appears here, "
+                "then press **Run reconstruction**.")
+    else:
+        auto_table = core.looks_like_table(data or core.sample_table_text().encode(), delim)
+        mode = right.radio(
+            "Data layout",
+            ["Table (columns are separate variables)", "Grid (one numeric matrix)"],
+            index=0 if auto_table else 1, key=f"mode_{source}_{auto_table}",
+            help="Table: each numeric column is repaired on its own, text columns are kept. "
+                 "Grid: the whole file is one spatial matrix (rows x columns).")
+        is_table = mode.startswith("Table")
+        if data is None:
+            data = (core.sample_table_text() if is_table else core.sample_csv_text()).encode()
+        decay = right.select_slider("Inward decay", options=[1.0, 0.95, 0.85], value=1.0, key="csv_decay")
+        if is_table:
+            conn, blend, header = 4, False, True
+            right.caption("Post-fill blend is off in table mode (it was tuned on 2D grids).")
+        else:
+            conn = right.radio("Void connectivity", [4, 8], horizontal=True, key="csv_conn")
+            blend = right.checkbox("Post-fill blend (recommended)", value=True, key="csv_blend")
+            header = right.checkbox("First row is a header (skip it)", value=False)
+
+        # ---- step 1: scan -------------------------------------------------
         try:
-            grid, w, h = core.load_grid_from_bytes(data, delim)
+            scanned, missing = scan_table(data, delim) if is_table else scan_grid(data, delim, header)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not read the file: {exc}")
-            grid = None
-        if grid is not None:
-            if w * h > core.MAX_CELLS_2D:
-                st.error(f"This grid is {w}x{h} = {w*h} cells. The hosted app is limited to "
-                         f"{core.MAX_CELLS_2D} cells. Use the command line version for larger files.")
-            elif not grid:
-                st.error("No numeric values found. Check the delimiter and the header option.")
+            scanned = None
+        if scanned is not None:
+            n_missing = int(missing.values.sum())
+            n_cells = int(len(scanned) * len(scanned.columns))
+            st.subheader("📋 Scanned Data")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Rows", len(scanned))
+            m2.metric("Columns", len(scanned.columns))
+            m3.metric("Missing cells", n_missing)
+            m4.metric("Missing share", f"{100 * n_missing / max(1, n_cells):.1f}%")
+            scan_preview(scanned, missing)
+            st.caption("Red cells are missing and shown as None. Everything else is exactly as uploaded.")
+
+            if n_missing == 0:
+                st.success("No missing cells were found, so there is nothing to repair.")
             else:
-                res = core.repair_matrix(grid, w, h, conn, decay, blend)
-                if res["report"] is None:
-                    st.success("No missing cells were found, so nothing was changed.")
-                else:
-                    show_summary(res["summary"])
-                    vmin, vmax = np.nanmin(res["original"]), np.nanmax(res["original"])
-                    fig, axs = plt.subplots(1, 2, figsize=(9, 4))
-                    heat(axs[0], res["original"], "Original (grey = missing)", vmin, vmax)
-                    heat(axs[1], res["repaired"], "Repaired", vmin, vmax)
-                    st.pyplot(fig)
-                    plt.close(fig)
-                    st.download_button("Download repaired CSV", core.matrix_to_csv(res["repaired"]),
-                                       file_name="gde_repaired.csv", mime="text/csv")
-                    if res["summary"]["cells_stalled"]:
-                        st.warning(f"{res['summary']['cells_stalled']} cell(s) had no path to any recorded "
-                                   "value and stay as NaN.")
-                    with st.expander("Audit trail (one row per reconstructed cell)"):
-                        df = pd.DataFrame(core.audit_rows(res["report"], w, h))
-                        st.dataframe(df, use_container_width=True)
-                        st.download_button("Download audit trail (CSV)", df.to_csv(index=False),
-                                           file_name="gde_audit.csv", mime="text/csv")
+                # ---- step 2: reconstruct ------------------------------------
+                sig = hashlib.sha1(repr((data, delim, is_table, decay, conn, blend, header)).encode()).hexdigest()
+                if st.button("🚀 Run reconstruction", type="primary"):
+                    st.session_state["csv_sig"] = sig
+
+                if st.session_state.get("csv_sig") == sig:
+                    try:
+                        res = (run_table(data, delim, decay) if is_table
+                               else run_grid(data, delim, header, conn, decay, blend))
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Could not process the file: {exc}")
+                        res = None
+                    if res is not None:
+                        if is_table:
+                            repaired, filled = res["repaired"], res["filled"]
+                            summary, audit = res["summary"], res["audit"]
+                        else:
+                            summary, audit = res["summary"], res.get("audit")
+                            repaired = pd.DataFrame(res["repaired"], columns=scanned.columns)
+                            filled = pd.DataFrame(res["filled_mask"], columns=scanned.columns)
+
+                        st.success("Reconstruction Complete!")
+                        show_summary(summary)
+                        st.subheader("✨ Repaired Output Preview")
+                        preview(repaired, filled)
+                        st.caption("Green cells were reconstructed; everything else is exactly as uploaded.")
+                        if is_table and res["skipped"]:
+                            st.warning("No recorded value at all in: " + ", ".join(res["skipped"]) + ". Left as None.")
+                        elif summary["cells_stalled"]:
+                            st.warning(f"{summary['cells_stalled']} cell(s) had no path to any recorded "
+                                       "value and stay as None.")
+                        csv_out = repaired.to_csv(index=False) if is_table else core.matrix_to_csv(res["repaired"])
+                        st.download_button("Download repaired CSV", csv_out, file_name="gde_repaired.csv",
+                                           mime="text/csv")
+                        if not is_table:
+                            with st.expander("Heatmaps"):
+                                vmin, vmax = np.nanmin(res["original"]), np.nanmax(res["original"])
+                                fig, axs = plt.subplots(1, 2, figsize=(9, 4))
+                                heat(axs[0], res["original"], "Original (grey = missing)", vmin, vmax)
+                                heat(axs[1], res["repaired"], "Repaired", vmin, vmax)
+                                st.pyplot(fig)
+                                plt.close(fig)
+                        with st.expander("Audit trail (one row per reconstructed cell)"):
+                            df = pd.DataFrame(audit)
+                            st.dataframe(df, width="stretch")
+                            st.download_button("Download audit trail (CSV)", df.to_csv(index=False),
+                                               file_name="gde_audit.csv", mime="text/csv")
 
 # ---------------------------------------------------------------------------
 # Tab 2: 2D demo with known truth
@@ -120,10 +292,12 @@ with tab_2d:
     shapes = c3.multiselect("Void shapes", list(SHAPE_BUILDERS), default=["blob", "rectangle", "l_shape"])
     d_conn = c1.radio("Connectivity", [4, 8], horizontal=True, key="d2_conn")
     d_blend = c2.checkbox("Post-fill blend", value=True, key="d2_blend")
+    if st.button("Run 2D demo", type="primary"):
+        st.session_state["d2_ran"] = True
     if not shapes:
         st.info("Pick at least one void shape.")
-    else:
-        r = core.run_demo_2d(size, size, int(seed), nv, vs, shapes, field, d_conn, 1.0, d_blend)
+    elif st.session_state.get("d2_ran"):
+        r = demo_2d(size, size, int(seed), nv, vs, shapes, field, d_conn, 1.0, d_blend)
         if r["report"] is None:
             st.info("No voids were generated; try another seed.")
         else:
@@ -145,6 +319,8 @@ with tab_2d:
             st.pyplot(fig)
             plt.close(fig)
             st.caption("The engine only sees the second panel. The truth is used afterwards to score.")
+    else:
+        st.info("Set the options, then press **Run 2D demo**.")
 
 # ---------------------------------------------------------------------------
 # Tab 3: 3D space-time
@@ -160,10 +336,12 @@ with tab_3d:
     tdec = c3.slider("Temporal decay", 0.05, 1.0, 0.5)
     mw_on = st.checkbox("Cap propagation depth (decline cells deeper than N waves)")
     mw = st.slider("Max waves", 1, 10, 4) if mw_on else None
+    if st.button("Run space-time demo", type="primary"):
+        st.session_state["d3_ran"] = True
     if sz * sz * fr > core.MAX_CELLS_3D:
-        st.error(f"{sz*sz*fr} cells exceeds the hosted limit of {core.MAX_CELLS_3D}.")
-    else:
-        r3 = core.run_demo_3d(sz, fr, int(sd), nc, mf, tdec, 4, 0.9, mw)
+        st.error(f"{sz * sz * fr} cells exceeds the hosted limit of {core.MAX_CELLS_3D}.")
+    elif st.session_state.get("d3_ran"):
+        r3 = demo_3d(sz, fr, int(sd), nc, mf, tdec, 4, 0.9, mw)
         s = r3["report"]["summary"]
         a, b, c, d = st.columns(4)
         a.metric("Hidden cells", s["missing_cells"])
@@ -179,6 +357,8 @@ with tab_3d:
         st.pyplot(fig)
         plt.close(fig)
         st.caption("Confidence scores are heuristic diagnostics, not probabilities. See the calibration tab.")
+    else:
+        st.info("Set the options, then press **Run space-time demo**.")
 
 # ---------------------------------------------------------------------------
 # Tab 4: benchmarks and calibration
@@ -191,12 +371,9 @@ with tab_bench:
     bsize = bc1.slider("Grid size", 15, 50, 30, key="bs")
     bfrac = bc2.slider("Hidden fraction", 0.05, 0.5, 0.2, key="bf")
     if st.button("Run benchmark"):
-        from benchmark import run_benchmark
-        import contextlib
-        with contextlib.redirect_stdout(io.StringIO()):
-            out = run_benchmark(width=bsize, height=bsize, missing_fraction=bfrac, seed=7)
+        out = synthetic_benchmark(bsize, bfrac)
         rows = [{"method": k, **v} for k, v in out["methods"].items()]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch")
         st.caption("Lower MAE/RMSE is better. One synthetic field and one seed: indicative only.")
 
     st.divider()
@@ -205,7 +382,7 @@ with tab_bench:
     nseeds = k1.slider("Seeds", 3, 20, 8)
     csize = k2.slider("Grid size", 10, 24, 14, key="cs")
     if st.button("Run calibration"):
-        res = core.run_calibration(nseeds, csize, 6)
+        res = calibration(nseeds, csize, 6)
         rho = res["spearman_confidence_vs_error"]
         x1, x2, x3 = st.columns(3)
         x1.metric("Cells scored", res["reconstructed_cells"])
@@ -214,7 +391,7 @@ with tab_bench:
         bdf = pd.DataFrame([{"confidence": f"{b['low']:.1f}-{b['high']:.1f}", "cells": b["cells"],
                              "mean error": b["mean_error"], "P95 error": b["p95_error"]}
                             for b in res["buckets"]])
-        st.dataframe(bdf, use_container_width=True)
+        st.dataframe(bdf, width="stretch")
         st.caption("A negative rho means higher confidence goes with lower error. Buckets with under 30 cells are unreliable.")
 
 # ---------------------------------------------------------------------------
@@ -225,6 +402,9 @@ with tab_about:
 **Ghost Data Engine** finds voids in a 2D grid (connected missing regions), measures the tension of the
 recorded cells around each void, and fills it with inward propagation waves, optional smoothing, and
 optional post-fill blends. A 3D version does the same across time frames.
+
+**Table mode** repairs each numeric column of a CSV on its own (gaps are filled from the recorded values
+above and below) and leaves text columns untouched. **Grid mode** treats the whole file as one spatial matrix.
 
 **What it is not:** it does not recover the true hidden values. It produces auditable estimates, and the
 confidence score is a heuristic. Use the benchmark and calibration tabs to see how large errors really are.

@@ -4,20 +4,25 @@ Everything here is plain Python/NumPy so it can be tested without Streamlit.
 The engine modules (scanner, tension, reconstructor, engine_v3, ...) are used unchanged.
 """
 import contextlib
+import csv
 import io
 import os
 import random
 import tempfile
 
 import numpy as np
+import pandas as pd
 
 import engine_v3 as E
 from generator import SHAPE_BUILDERS, _carve_voids
 from gde_spatiotemporal import reconstruct_3d
 import calibrate_confidence as cc
 
-MAX_CELLS_2D = 6000          # pure-Python engine: keep the hosted app responsive
+MAX_CELLS_2D = 60000         # measured: ~1s at 13k cells, ~9s at 50k on one core
 MAX_CELLS_3D = 12000
+MAX_TABLE_CELLS = 60000
+SENTINELS = {"", "nan", "NaN", "NAN", "null", "NULL", "missing", "-999", "-999.0", "bad", "gap",
+             "NA", "N/A", "n/a"}
 
 
 def _quiet(fn, *a, **k):
@@ -28,12 +33,22 @@ def _quiet(fn, *a, **k):
 # ---------------------------------------------------------------------------
 # 2D repair
 # ---------------------------------------------------------------------------
+def decode_bytes(data: bytes) -> str:
+    """Decode an upload; utf-8 with or without BOM, then Windows-1252 (Excel exports)."""
+    for enc in ("utf-8-sig", "cp1252"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def load_grid_from_bytes(data: bytes, delimiter=","):
     """CSV bytes -> (grid dict, width, height). Uses the engine's own loader."""
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "upload.csv")
-        with open(path, "wb") as fh:
-            fh.write(data)
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(decode_bytes(data))
         grid, w, h = _quiet(E.load_csv_with_gaps, path, delimiter)
     return grid, w, h
 
@@ -87,6 +102,101 @@ def matrix_to_csv(matrix):
 
 def sample_csv_text():
     return ("12.5,13.1,missing,14.2\n11.9,bad,12.8,13.0\n10.1,10.5,11.2,NaN\n")
+
+
+def sample_table_text():
+    """Small telemetry-style table with text columns and gaps in the numeric ones."""
+    return ("Orbital_Regime,Anomaly_Type,Latitude_Deg,Longitude_Deg,Solar_Radiation_Wm2\n"
+            "Low Earth Orbit (LEO),Ground Station Loss,-12.4502,45.1025,1361.2\n"
+            "Sun-Synchronous,Cloud Coverage Blackout,52.52,13.405,1359.8\n"
+            "Sun-Synchronous,Packet Drop,,,1360.15\n"
+            "Sun-Synchronous,Sensor Signal Noise,52.61,13.521,\n"
+            "Geostationary (GEO),Solar Flare Noise,0.012,-75.201,1385.1\n"
+            "Geostationary (GEO),Missing Values,,-75.202,1362\n")
+
+
+# ---------------------------------------------------------------------------
+# Table mode: files with a header row and/or text columns
+# ---------------------------------------------------------------------------
+def _is_number(text):
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def looks_like_table(data: bytes, delimiter=","):
+    """True when the first row holds a real text label (a header), not just numbers/gap markers."""
+    first = next(csv.reader(io.StringIO(decode_bytes(data)), delimiter=delimiter), [])
+    return any(c.strip() not in SENTINELS and not _is_number(c.strip()) for c in first)
+
+
+def read_table(data: bytes, delimiter=","):
+    """CSV bytes -> (DataFrame, numeric column names). Numeric columns become floats (gaps = NaN);
+    text columns are kept exactly as written."""
+    df = pd.read_csv(io.StringIO(decode_bytes(data)), sep=delimiter, dtype=str, keep_default_na=False)
+    df.columns = [str(c).strip() or f"col_{i + 1}" for i, c in enumerate(df.columns)]
+    numeric = []
+    for c in df.columns:
+        s = df[c].astype(str).str.strip()
+        gap = s.isin(SENTINELS)
+        vals = pd.to_numeric(s.where(~gap), errors="coerce")
+        if vals.notna().any() and not (vals.isna() & ~gap).any():
+            df[c] = vals.replace([np.inf, -np.inf], np.nan)
+            numeric.append(c)
+    return df, numeric
+
+
+def repair_table(df, numeric_cols, inward_decay=1.0, blend=False):
+    """Repair every numeric column of `df` with the real engine, one column at a time.
+
+    Each numeric column is a 1-wide grid whose rows are the records, so a gap is a void along the
+    column and is filled from the recorded values above/below it. Columns are never mixed (latitude
+    is never filled from a radiation value). Text columns and recorded cells are never changed.
+    The post-fill blends were tuned on 2D grids, so they are off by default here: on a single
+    column they pull values toward far-away rows.
+    """
+    n = len(df)
+    out = df.copy()
+    filled = pd.DataFrame(False, index=df.index, columns=df.columns)
+    audit, per_column, skipped = [], [], []
+    tot = {"voids": 0, "reconstructed": 0, "stalled": 0}
+    confs = []
+    for col in numeric_cols:
+        series = df[col].astype(float)
+        grid = {(1, n - i): {"status": "Recorded", "intensity": float(v)}
+                for i, v in enumerate(series) if np.isfinite(v)}
+        missing = n - len(grid)
+        if missing == 0:
+            continue
+        if not grid:
+            skipped.append(col)
+            continue
+        voids, report = _quiet(E.repair_grid, grid, 1, n, 4, inward_decay, 0.0, "accurate", True)
+        if blend:
+            E.apply_blends(grid, report, 1, n, knn_blend=E.DEFAULT_KNN_BLEND, row_blend=E.DEFAULT_ROW_BLEND)
+        for key, r in report["audit_trail"].items():
+            x, y = (int(v) for v in key.strip("()").split(","))
+            i = n - y
+            out.loc[out.index[i], col] = r["intensity"]
+            filled.loc[filled.index[i], col] = True
+            confs.append(r["confidence"])
+            audit.append({"row": i, "column": col, "void_id": r["void_id"], "value": r["intensity"],
+                          "wave": r["wave"], "confidence (heuristic)": r["confidence"],
+                          "sources": r["walls_used"], "method": r["interpolation"]})
+        s = report["summary"]
+        tot["voids"] += s["total_voids"]
+        tot["reconstructed"] += s["cells_reconstructed"]
+        tot["stalled"] += s["cells_stalled"]
+        per_column.append({"column": col, "missing": missing, "filled": s["cells_reconstructed"],
+                           "not filled": s["cells_stalled"]})
+    summary = {"total_voids": tot["voids"], "cells_reconstructed": tot["reconstructed"],
+               "cells_stalled": tot["stalled"] + sum(int(df[c].isna().sum()) for c in skipped),
+               "mean_confidence": round(sum(confs) / len(confs), 4) if confs else 0.0}
+    audit.sort(key=lambda d: (d["column"], d["row"]))
+    return {"repaired": out, "filled": filled, "summary": summary, "audit": audit,
+            "per_column": per_column, "skipped": skipped, "any_missing": bool(per_column or skipped)}
 
 
 # ---------------------------------------------------------------------------
