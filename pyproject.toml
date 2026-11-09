@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ghost-data-engine"
+version = "3.3.0"
+description = "Auditable, dependency-free gap filler for 2D gridded data (with optional post-fill blends)."
+license = {text = "MIT"}
+requires-python = ">=3.8"
+authors = [{name = "Maurice Gathungu"}]
+
+[project.optional-dependencies]
+benchmark = ["numpy>=1.24", "scipy>=1.10", "scikit-image>=0.21"]
+climate = ["numpy>=1.24", "scipy>=1.10", "xarray", "netCDF4", "rasterio", "tifffile"]
+viz = ["matplotlib"]
+
+[tool.setuptools]
+py-modules = ["generator", "scanner", "tension", "reconstructor", "spatiotemporal",
+              "gde_spatiotemporal", "main", "data_wrapper", "engine_v3", "benchmark",
+              "real_benchmark", "benchmark_real_climate", "ablation_study",
+              "calibrate_confidence",
+              "multi_timeline", "quantum_ghost_engine",
+              "visualization_3d", "gui_app"]

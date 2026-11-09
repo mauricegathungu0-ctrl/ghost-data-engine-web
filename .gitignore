@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.venv/
+sample_corrupted_data.csv
+sample_fixed_data.csv
