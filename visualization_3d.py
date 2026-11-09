@@ -26,7 +26,7 @@ def save_3d_visualization(result, output_path="ghost_data_3d.png"):
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Time / frame")
-    ax.set_title("Ghost Data Engine 3.0 — Space-Time Reconstruction")
+    ax.set_title("Ghost Data Engine 3.3 — Space-Time Reconstruction")
     if known or inferred or unresolved:
         ax.legend()
     fig.tight_layout()

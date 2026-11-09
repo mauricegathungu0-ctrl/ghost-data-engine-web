@@ -11,7 +11,7 @@ from engine_v3 import process_and_fix_file, DEFAULT_KNN_BLEND, DEFAULT_ROW_BLEND
 class GhostDataEngineApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Ghost Data Engine 3.0 — Control Console")
+        self.root.title("Ghost Data Engine 3.3 — Control Console")
         self.root.geometry("600x420")
         self.root.resizable(False, False)
         
@@ -25,7 +25,7 @@ class GhostDataEngineApp:
         
         # --- UI ELEMENTS LAYOUT ---
         # Header Banner
-        header = tk.Label(root, text="GHOST DATA ENGINE v3.0", font=("Arial", 16, "bold"), fg="#2c3e50")
+        header = tk.Label(root, text="GHOST DATA ENGINE v3.3", font=("Arial", 16, "bold"), fg="#2c3e50")
         header.pack(pady=15)
         
         # Frame Layout wrapper

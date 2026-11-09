@@ -10,9 +10,7 @@ import unittest
 import engine_v3 as E
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-V3 = os.path.join(os.path.dirname(HERE), "v3")
-if not os.path.exists(os.path.join(V3, "gui_app.py")):   # flat layout (e.g. the web-app repo)
-    V3 = HERE
+V3 = os.path.dirname(HERE)                               # project root holds gui_app.py
 
 
 def _write(path, rows):

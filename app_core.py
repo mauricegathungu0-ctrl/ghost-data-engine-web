@@ -18,9 +18,19 @@ from generator import SHAPE_BUILDERS, _carve_voids
 from gde_spatiotemporal import reconstruct_3d
 import calibrate_confidence as cc
 
-MAX_CELLS_2D = 60000         # measured: ~1s at 13k cells, ~9s at 50k on one core
-MAX_CELLS_3D = 12000
-MAX_TABLE_CELLS = 60000
+def _cap(name, default):
+    """Processing cap in cells; override with an environment variable on a bigger server."""
+    try:
+        return max(1, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+# Upload size (500 MB) is set in .streamlit/config.toml. These caps limit how many cells the
+# pure-Python engine will repair in one request. Measured: ~1s at 13k cells, ~9s at 50k on one core.
+MAX_CELLS_2D = _cap("GDE_MAX_CELLS_2D", 60000)
+MAX_CELLS_3D = _cap("GDE_MAX_CELLS_3D", 12000)
+MAX_TABLE_CELLS = _cap("GDE_MAX_TABLE_CELLS", 60000)
 SENTINELS = {"", "nan", "NaN", "NAN", "null", "NULL", "missing", "-999", "-999.0", "bad", "gap",
              "NA", "N/A", "n/a"}
 
@@ -135,7 +145,20 @@ def looks_like_table(data: bytes, delimiter=","):
 def read_table(data: bytes, delimiter=","):
     """CSV bytes -> (DataFrame, numeric column names). Numeric columns become floats (gaps = NaN);
     text columns are kept exactly as written."""
-    df = pd.read_csv(io.StringIO(decode_bytes(data)), sep=delimiter, dtype=str, keep_default_na=False)
+    text = decode_bytes(data)
+    skipped = 0
+    try:
+        df = pd.read_csv(io.StringIO(text), sep=delimiter, dtype=str, keep_default_na=False)
+    except pd.errors.ParserError:
+        # Malformed lines (more fields than the header): drop them, but count them so the app can say so.
+        rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+        width = len(rows[0]) if rows else 0
+        kept = [r for r in rows if len(r) <= width]
+        skipped = len(rows) - len(kept)
+        buf = io.StringIO()
+        csv.writer(buf, delimiter=delimiter, lineterminator="\n").writerows(kept)
+        df = pd.read_csv(io.StringIO(buf.getvalue()), sep=delimiter, dtype=str, keep_default_na=False)
+    df.attrs["skipped_lines"] = skipped
     df.columns = [str(c).strip() or f"col_{i + 1}" for i, c in enumerate(df.columns)]
     numeric = []
     for c in df.columns:

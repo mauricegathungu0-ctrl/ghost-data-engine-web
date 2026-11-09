@@ -1,10 +1,10 @@
 """evaluate_blends.py - reproduces the table in RESULTS.md (needs numpy + scipy; ~1 minute).
-Usage (from tests/):  python evaluate_blends.py
+Usage (from research/):  python evaluate_blends.py
 Evaluate post-fill blends. Tune on masks 1-5, report on masks 6-10.
 The filler (engine_v3) only ever reads the *_MISSING.csv file; the answer key is read here, for scoring only."""
 import sys, os, io, csv, copy, json, contextlib
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "v3")
+ENGINE_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..")
 DATA_ROOT = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "data")
 OUT = sys.argv[3] if len(sys.argv) > 3 else os.path.join(HERE, "blend_results.json")
 sys.path.insert(0, ENGINE_DIR)

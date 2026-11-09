@@ -1,0 +1,8 @@
+-r requirements.txt
+scipy>=1.10
+scikit-image>=0.21
+# optional: reading real climate files (benchmark_real_climate.py)
+xarray
+netCDF4
+rasterio
+tifffile

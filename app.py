@@ -72,6 +72,8 @@ def _check_size(cells, label):
 @st.cache_data(show_spinner="Scanning file...", max_entries=16)
 def scan_table(data, delim):
     df, numeric = core.read_table(data, delim)
+    if df.attrs.get("skipped_lines"):
+        st.warning(f"{df.attrs['skipped_lines']} malformed line(s) in the file were skipped while reading it.")
     _check_size(len(df) * max(1, len(numeric)), "table")
     if not numeric:
         raise ValueError("No numeric columns were found to repair.")
@@ -153,7 +155,7 @@ st.sidebar.info(
     "**Open Core / Public Demo**\n\n"
     "This public demo runs the real Ghost Data Engine directly: pure-Python, tension-weighted "
     "multi-wave reconstruction with optional post-fill blends. Every filled cell has an audit row. "
-    "File size limits keep the hosted app responsive; use the command line for larger files."
+    "Uploads up to 500 MB are accepted; a cell cap per request keeps the hosted app responsive, so use the command line for very large grids."
 )
 
 # ---------------------------------------------------------------------------
@@ -173,7 +175,8 @@ with tab_csv:
              "treated as gaps. Recorded cells and text columns are never changed.")
     left, right = st.columns([2, 1])
     with left:
-        up = st.file_uploader("CSV file", type=["csv", "txt"])
+        up = st.file_uploader("CSV file", type=["csv", "txt"],
+                              help="Uploads up to 500 MB are accepted. Files with more cells than the processing cap are scanned but not repaired here; use the command line for those.")
         use_sample = st.checkbox("Use the built-in sample", value=False, key="csv_sample",
                                  help="Used only while no file is uploaded.")
     with right:

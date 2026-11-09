@@ -32,7 +32,7 @@ def run_ghost_engine(
     blend=True (default) applies the engine_v3 post-fill blends (DEFAULT_KNN_BLEND, DEFAULT_ROW_BLEND)
     to the filled cells using recorded cells only; blend=False gives the plain engine output.
     """
-    print("=== INITIALIZING GHOST DATA ENGINE 3.0 ===")
+    print("=== INITIALIZING GHOST DATA ENGINE 3.3 ===")
 
     # Step 1: generate a grid (with ground truth so the scanner can be checked)
     grid, truth = generate_dataset(
@@ -71,7 +71,7 @@ def print_report(result, audit_limit=15):
     report = result["report"]
     s = report["summary"]
 
-    print("\n=== GHOST DATA ENGINE 3.0 — FINAL STRUCTURAL REPORT ===")
+    print("\n=== GHOST DATA ENGINE 3.3 — FINAL STRUCTURAL REPORT ===")
     print(f"Scanner vs ground truth : {'OK' if result['scanner_ok'] else 'MISMATCH'}")
     print(f"Total voids             : {s.get('total_voids', 0)}")
     print(f"Total void cells        : {s.get('total_void_cells', 0)}")
@@ -118,7 +118,7 @@ def _add(parser, name, **kw):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="Ghost Data Engine 3.0: robust, tension-informed 2D reconstruction.")
+    p = argparse.ArgumentParser(description="Ghost Data Engine 3.3: robust, tension-informed 2D reconstruction.")
     _add(p, "width", type=int, default=20, help="grid width (default 20)")
     _add(p, "height", type=int, default=20, help="grid height (default 20)")
     _add(p, "seed", type=int, default=None, help="random seed for reproducible grids")

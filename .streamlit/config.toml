@@ -1,5 +1,6 @@
+[server]
+# Largest file the upload widget accepts, in MB (Streamlit's default is 200).
+maxUploadSize = 500
+
 [theme]
 base = "dark"
-
-[server]
-maxUploadSize = 10

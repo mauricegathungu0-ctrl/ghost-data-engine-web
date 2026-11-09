@@ -14,11 +14,16 @@ authors = [{name = "Maurice Gathungu"}]
 benchmark = ["numpy>=1.24", "scipy>=1.10", "scikit-image>=0.21"]
 climate = ["numpy>=1.24", "scipy>=1.10", "xarray", "netCDF4", "rasterio", "tifffile"]
 viz = ["matplotlib"]
+web = ["streamlit>=1.50", "numpy>=1.24", "pandas>=2.1", "matplotlib>=3.7"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [tool.setuptools]
 py-modules = ["generator", "scanner", "tension", "reconstructor", "spatiotemporal",
               "gde_spatiotemporal", "main", "data_wrapper", "engine_v3", "benchmark",
               "real_benchmark", "benchmark_real_climate", "ablation_study",
               "calibrate_confidence",
-              "multi_timeline", "quantum_ghost_engine",
+              "multi_timeline", "quantum_ghost_engine", "app_core",
               "visualization_3d", "gui_app"]

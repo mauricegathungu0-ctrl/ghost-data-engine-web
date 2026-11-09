@@ -40,6 +40,15 @@ class TableModeTests(unittest.TestCase):
         self.assertIn("Latitude_Deg", res["skipped"])
         self.assertTrue(res["repaired"]["Latitude_Deg"].isna().all())
 
+    def test_malformed_lines_are_skipped_and_counted_not_fatal(self):
+        raw = b"name,val\na,1\nb,2,EXTRA,FIELDS\nc,\nd,4\n"
+        df, numeric = core.read_table(raw)
+        self.assertEqual(df.attrs["skipped_lines"], 1)
+        self.assertEqual(list(df["name"]), ["a", "c", "d"])
+        self.assertEqual(numeric, ["val"])
+        clean, _ = core.read_table(b"name,val\na,1\n")
+        self.assertEqual(clean.attrs["skipped_lines"], 0)
+
     def test_no_gaps_means_nothing_to_do(self):
         full = core.read_table(b"a,b\nx,1\ny,2\n")
         res = core.repair_table(*full)
