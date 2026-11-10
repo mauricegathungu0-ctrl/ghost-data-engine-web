@@ -284,3 +284,166 @@ def run_demo_3d(size=16, frames=6, seed=3, num_clouds=3, max_fraction=0.4,
 
 def run_calibration(seeds=8, size=16, frames=6):
     return cc.run(seeds=seeds, size=size, frames=frames)
+
+
+# ---------------------------------------------------------------------------
+# Live accuracy test: hide known cells, repair, score against the truth
+# ---------------------------------------------------------------------------
+def load_complete_matrix(data: bytes, delimiter=","):
+    """Complete numeric CSV bytes -> (h, w) float matrix. Raises ValueError if not a clean numeric grid."""
+    text = decode_bytes(data)
+    rows = [r for r in csv.reader(io.StringIO(text), delimiter=delimiter) if r]
+    if not rows:
+        raise ValueError("The file is empty.")
+    try:
+        m = np.array([[float(x) for x in r] for r in rows], dtype=float)
+    except ValueError:
+        raise ValueError("This test needs a complete, all-numeric CSV with no header and no blanks.")
+    if m.ndim != 2 or not np.isfinite(m).all():
+        raise ValueError("This test needs a complete CSV (every cell a number, rows of equal length).")
+    return m
+
+
+def make_hide_mask(shape, scatter=0.05, blocks=6, bmin=30, bmax=90, seed=0, custom=None):
+    """True = hidden. Scattered single cells + random multi-day outages (+ one optional custom block).
+
+    custom = (row_from, row_to, col_from, col_to), 1-based inclusive.
+    """
+    h, w = shape
+    rng = np.random.default_rng(int(seed))
+    mask = rng.random(shape) < scatter
+    bmax = max(1, min(int(bmax), w - 1))
+    bmin = max(1, min(int(bmin), bmax))
+    for _ in range(int(blocks)):
+        bh = int(rng.integers(1, min(3, h) + 1))
+        bw = int(rng.integers(bmin, bmax + 1))
+        r = int(rng.integers(0, h - bh + 1))
+        c = int(rng.integers(0, w - bw + 1))
+        mask[r:r + bh, c:c + bw] = True
+    if custom:
+        r0, r1, c0, c1 = custom
+        mask[max(0, r0 - 1):min(h, r1), max(0, c0 - 1):min(w, c1)] = True
+    mask[mask.all(axis=1)] = False          # keep some context in every row
+    mask[:, mask.all(axis=0)] = False       # ... and every column
+    return mask
+
+
+def _to_grid(truth, mask):
+    h, w = truth.shape
+    return {(x + 1, h - i): {"status": "Recorded", "intensity": float(truth[i, x])}
+            for i in range(h) for x in range(w) if not mask[i, x]}
+
+
+def _base_row_linear(truth, mask):
+    out = truth.copy()
+    xs = np.arange(truth.shape[1])
+    for i in range(truth.shape[0]):
+        ok = ~mask[i]
+        if ok.any() and mask[i].any():
+            out[i, mask[i]] = np.interp(xs[mask[i]], xs[ok], truth[i, ok])
+    return out
+
+
+def _base_same_col_mean(truth, mask):
+    out = truth.copy()
+    vals = np.where(mask, np.nan, truth)
+    with np.errstate(all="ignore"):
+        col = np.nanmean(vals, axis=0)
+    col = np.where(np.isnan(col), np.nanmean(vals), col)
+    ii, jj = np.nonzero(mask)
+    out[ii, jj] = col[jj]
+    return out
+
+
+def accuracy_test(truth, mask, blend=True):
+    """Repair `truth` with `mask` hidden. Methods only read cells where ~mask. Returns a result dict."""
+    import time
+    h, w = truth.shape
+    t0 = time.time()
+    res = repair_matrix(_to_grid(truth, mask), w, h, blend=blend)
+    gde_sec = time.time() - t0
+    repaired = np.where(mask, res["repaired"], truth)
+    not_filled = mask & ~res["filled_mask"]
+    preds = {"Ghost Data Engine": repaired}
+    secs = {"Ghost Data Engine": gde_sec}
+    for name, fn in (("Linear interpolation (along each row)", _base_row_linear),
+                     ("Column mean (same position in other rows)", _base_same_col_mean)):
+        t0 = time.time()
+        preds[name] = fn(truth, mask)
+        secs[name] = time.time() - t0
+    rows = []
+    for name, p in preds.items():
+        sel = mask & ~not_filled if name == "Ghost Data Engine" else mask
+        err = p[sel] - truth[sel]
+        rows.append({"Method": name, "Mean abs. error": float(np.mean(np.abs(err))) if err.size else float("nan"),
+                     "RMSE": float(np.sqrt(np.mean(err ** 2))) if err.size else float("nan"),
+                     "Seconds": secs[name]})
+    return {"repaired": repaired, "filled_mask": res["filled_mask"], "not_filled": not_filled,
+            "scores": rows, "summary": res["summary"], "n_hidden": int(mask.sum()),
+            "n_filled": int((mask & res["filled_mask"]).sum())}
+
+
+# ---------------------------------------------------------------------------
+# Labelled grids: first row = headings (e.g. "Jan 01"), first column = row labels (e.g. a year)
+# ---------------------------------------------------------------------------
+def _num(text):
+    try:
+        float(text.strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _read_rows(data: bytes, delimiter=","):
+    return [r for r in csv.reader(io.StringIO(decode_bytes(data)), delimiter=delimiter) if r]
+
+
+def detect_labelled(data: bytes, delimiter=","):
+    """True if the file looks like a wide numeric grid with a heading row and a label column."""
+    rows = _read_rows(data, delimiter)
+    if len(rows) < 3 or len(rows[0]) < 12:
+        return False
+    head = rows[0][1:]
+    if sum(_num(c) for c in head if c.strip()) > 0.5 * max(1, len(head)):
+        return False                       # headings are numbers: not a heading row
+    body = rows[1:]
+    if len(rows[0]) <= len(body):
+        return False                       # more rows than columns looks like a normal table
+    ok = total = 0
+    for r in body[:20]:
+        for c in r[1:]:
+            if c.strip() and c.strip().lower() not in {"nan", "null", "missing", "bad", "gap", "-999"}:
+                total += 1
+                ok += _num(c)
+    return total > 0 and ok / total > 0.98
+
+
+def _unique(labels):
+    seen, out = {}, []
+    for lab in labels:
+        n = seen.get(lab, 0)
+        seen[lab] = n + 1
+        out.append(lab if n == 0 else f"{lab} ({n + 1})")
+    return out
+
+
+def split_labelled(data: bytes, delimiter=","):
+    """Return (corner, column_labels, row_labels, numeric_bytes) for a labelled grid."""
+    rows = _read_rows(data, delimiter)
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    corner = rows[0][0]
+    cols = _unique([c.strip() or f"col_{i + 1}" for i, c in enumerate(rows[0][1:])])
+    labels = _unique([r[0].strip() or f"row_{i + 1}" for i, r in enumerate(rows[1:])])
+    buf = io.StringIO()
+    csv.writer(buf, delimiter=delimiter, lineterminator="\n").writerows([r[1:] for r in rows[1:]])
+    return corner, cols, labels, buf.getvalue().encode("utf-8")
+
+
+def load_complete_with_labels(data: bytes, delimiter=","):
+    """Complete numeric CSV (labelled or plain) -> (matrix, row_labels, col_labels)."""
+    if detect_labelled(data, delimiter):
+        _corner, cols, labels, body = split_labelled(data, delimiter)
+        return load_complete_matrix(body, delimiter), labels, cols
+    m = load_complete_matrix(data, delimiter)
+    return m, [f"Row {i + 1}" for i in range(m.shape[0])], [str(j + 1) for j in range(m.shape[1])]

@@ -6,6 +6,7 @@ The engine itself is pure Python; this file only provides the interface.
 import contextlib
 import hashlib
 import io
+import os
 
 import matplotlib
 matplotlib.use("Agg")
@@ -83,14 +84,19 @@ def scan_table(data, delim):
 
 
 @st.cache_data(show_spinner="Scanning file...", max_entries=16)
-def scan_grid(data, delim, header):
-    if header:
+def scan_grid(data, delim, header, labelled=False):
+    cols = rows = None
+    if labelled:
+        _corner, cols, rows, data = core.split_labelled(data, delim)
+    elif header:
         data = data.split(b"\n", 1)[1] if b"\n" in data else b""
     grid, w, h = core.load_grid_from_bytes(data, delim)
     _check_size(w * h, "grid")
     if not grid:
         raise ValueError("No numeric values found. Check the delimiter and the header option.")
-    df = pd.DataFrame(core.grid_to_matrix(grid, w, h), columns=[f"col_{i + 1}" for i in range(w)])
+    df = pd.DataFrame(core.grid_to_matrix(grid, w, h),
+                      columns=cols if cols else [f"col_{i + 1}" for i in range(w)],
+                      index=rows if rows else None)
     return df, df.isna()
 
 
@@ -109,8 +115,10 @@ def run_table(data, delim, decay):
 
 
 @st.cache_data(show_spinner="Reconstructing...", max_entries=16)
-def run_grid(data, delim, header, conn, decay, blend):
-    if header:
+def run_grid(data, delim, header, conn, decay, blend, labelled=False):
+    if labelled:
+        data = core.split_labelled(data, delim)[3]
+    elif header:
         data = data.split(b"\n", 1)[1] if b"\n" in data else b""
     grid, w, h = core.load_grid_from_bytes(data, delim)
     if w * h > core.MAX_CELLS_2D:
@@ -123,6 +131,13 @@ def run_grid(data, delim, header, conn, decay, blend):
     if res["report"] is not None:
         res["audit"] = core.audit_rows(res["report"], w, h)
     return res
+
+
+@st.cache_data(show_spinner="Hiding cells, repairing and scoring...", max_entries=8)
+def live_test(data, delim, scatter, blocks, bmin, bmax, seed, custom, blend):
+    truth = core.load_complete_with_labels(data, delim)[0]
+    mask = core.make_hide_mask(truth.shape, scatter, blocks, bmin, bmax, seed, custom)
+    return truth, mask, core.accuracy_test(truth, mask, blend=blend)
 
 
 @st.cache_data(show_spinner="Running 2D demo...", max_entries=8)
@@ -163,8 +178,9 @@ st.title("👻 Ghost Data Engine")
 st.caption("Auditable gap filling for gridded data. Pure-Python engine; every filled cell has an audit row. "
            "Filled values are estimates, not recovered truth.")
 
-tab_csv, tab_2d, tab_3d, tab_bench, tab_about = st.tabs(
-    ["Repair my CSV", "2D demo with ground truth", "Space-time (3D)", "Benchmarks & calibration", "About"])
+tab_csv, tab_live, tab_2d, tab_3d, tab_bench, tab_about = st.tabs(
+    ["Repair my CSV", "🎯 Live accuracy test", "2D demo with ground truth", "Space-time (3D)",
+     "Benchmarks & calibration", "About"])
 
 # ---------------------------------------------------------------------------
 # Tab 1: repair an uploaded CSV
@@ -193,11 +209,12 @@ with tab_csv:
         st.info("Upload a CSV, or tick **Use the built-in sample**. The scanned data appears here, "
                 "then press **Run reconstruction**.")
     else:
-        auto_table = core.looks_like_table(data or core.sample_table_text().encode(), delim)
+        auto_labelled = bool(data) and core.detect_labelled(data, delim)
+        auto_table = (not auto_labelled) and core.looks_like_table(data or core.sample_table_text().encode(), delim)
         mode = right.radio(
             "Data layout",
             ["Table (columns are separate variables)", "Grid (one numeric matrix)"],
-            index=0 if auto_table else 1, key=f"mode_{source}_{auto_table}",
+            index=0 if auto_table else 1, key=f"mode_{source}_{auto_table}_{auto_labelled}",
             help="Table: each numeric column is repaired on its own, text columns are kept. "
                  "Grid: the whole file is one spatial matrix (rows x columns).")
         is_table = mode.startswith("Table")
@@ -205,16 +222,23 @@ with tab_csv:
             data = (core.sample_table_text() if is_table else core.sample_csv_text()).encode()
         decay = right.select_slider("Inward decay", options=[1.0, 0.95, 0.85], value=1.0, key="csv_decay")
         if is_table:
-            conn, blend, header = 4, False, True
+            conn, blend, header, labelled = 4, False, True, False
+            if auto_labelled:
+                right.warning("This file looks like a Year x Day grid. Table mode repairs each column "
+                              "separately, which is much less accurate here. Choose **Grid** instead.")
             right.caption("Post-fill blend is off in table mode (it was tuned on 2D grids).")
         else:
             conn = right.radio("Void connectivity", [4, 8], horizontal=True, key="csv_conn")
             blend = right.checkbox("Post-fill blend (recommended)", value=True, key="csv_blend")
-            header = right.checkbox("First row is a header (skip it)", value=False)
+            labelled = right.checkbox("Keep headings and row labels (first row and first column)",
+                                      value=auto_labelled, key=f"lab_{source}_{auto_labelled}",
+                                      help="For files such as Year x Day: the first row holds column headings and "
+                                           "the first column holds labels. They are shown and kept, never repaired.")
+            header = False if labelled else right.checkbox("First row is a header (skip it)", value=False)
 
         # ---- step 1: scan -------------------------------------------------
         try:
-            scanned, missing = scan_table(data, delim) if is_table else scan_grid(data, delim, header)
+            scanned, missing = scan_table(data, delim) if is_table else scan_grid(data, delim, header, labelled)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not read the file: {exc}")
             scanned = None
@@ -234,14 +258,14 @@ with tab_csv:
                 st.success("No missing cells were found, so there is nothing to repair.")
             else:
                 # ---- step 2: reconstruct ------------------------------------
-                sig = hashlib.sha1(repr((data, delim, is_table, decay, conn, blend, header)).encode()).hexdigest()
+                sig = hashlib.sha1(repr((data, delim, is_table, decay, conn, blend, header, labelled)).encode()).hexdigest()
                 if st.button("🚀 Run reconstruction", type="primary"):
                     st.session_state["csv_sig"] = sig
 
                 if st.session_state.get("csv_sig") == sig:
                     try:
                         res = (run_table(data, delim, decay) if is_table
-                               else run_grid(data, delim, header, conn, decay, blend))
+                               else run_grid(data, delim, header, conn, decay, blend, labelled))
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Could not process the file: {exc}")
                         res = None
@@ -251,8 +275,8 @@ with tab_csv:
                             summary, audit = res["summary"], res["audit"]
                         else:
                             summary, audit = res["summary"], res.get("audit")
-                            repaired = pd.DataFrame(res["repaired"], columns=scanned.columns)
-                            filled = pd.DataFrame(res["filled_mask"], columns=scanned.columns)
+                            repaired = pd.DataFrame(res["repaired"], columns=scanned.columns, index=scanned.index)
+                            filled = pd.DataFrame(res["filled_mask"], columns=scanned.columns, index=scanned.index)
 
                         st.success("Reconstruction Complete!")
                         show_summary(summary)
@@ -264,7 +288,12 @@ with tab_csv:
                         elif summary["cells_stalled"]:
                             st.warning(f"{summary['cells_stalled']} cell(s) had no path to any recorded "
                                        "value and stay as None.")
-                        csv_out = repaired.to_csv(index=False) if is_table else core.matrix_to_csv(res["repaired"])
+                        if is_table:
+                            csv_out = repaired.to_csv(index=False)
+                        elif labelled:
+                            csv_out = repaired.round(4).to_csv(index_label=core.split_labelled(data, delim)[0])
+                        else:
+                            csv_out = core.matrix_to_csv(res["repaired"])
                         st.download_button("Download repaired CSV", csv_out, file_name="gde_repaired.csv",
                                            mime="text/csv")
                         if not is_table:
@@ -280,6 +309,132 @@ with tab_csv:
                             st.dataframe(df, width="stretch")
                             st.download_button("Download audit trail (CSV)", df.to_csv(index=False),
                                                file_name="gde_audit.csv", mime="text/csv")
+
+# ---------------------------------------------------------------------------
+# Tab: live accuracy test (hide known cells yourself, repair, score)
+# ---------------------------------------------------------------------------
+SAMPLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data",
+                           "machakos_temperature_complete.csv")
+
+
+def _labelled(m, rows=None, cols=None):
+    return pd.DataFrame(m, index=rows or [f"Row {i + 1}" for i in range(m.shape[0])],
+                        columns=cols or [str(j + 1) for j in range(m.shape[1])])
+
+
+with tab_live:
+    st.subheader("Hide real data yourself, let the engine repair it, and check the answer")
+    st.write("Start from a **complete** dataset where every true value is known. You choose what to hide, "
+             "the engine sees only what is left, and the repaired values are scored against the truth "
+             "and against simple methods.")
+    src = st.radio("Data", ["Built-in: Machakos daily temperature (35 years x 365 days, NASA POWER)",
+                            "Upload my own complete CSV (all numbers; optional heading row and label column; no blanks)"],
+                   key="live_src")
+    live_data = None
+    if src.startswith("Built-in"):
+        if os.path.exists(SAMPLE_PATH):
+            with open(SAMPLE_PATH, "rb") as fh:
+                live_data = fh.read()
+        else:
+            st.error("The built-in file sample_data/machakos_temperature_complete.csv is missing.")
+    else:
+        up = st.file_uploader("Complete CSV", type=["csv", "txt"], key="live_up")
+        if up is not None:
+            live_data = up.getvalue()
+    if live_data is not None:
+        try:
+            truth_m, row_lab, col_lab = core.load_complete_with_labels(live_data)
+            if truth_m.size > core.MAX_CELLS_2D:
+                st.error(f"{truth_m.size} cells is above the hosted limit of {core.MAX_CELLS_2D}.")
+                truth_m = None
+        except ValueError as e:
+            st.error(str(e))
+            truth_m = None
+        if truth_m is not None:
+            H, W = truth_m.shape
+            st.caption(f"{H} rows x {W} columns = {truth_m.size} cells.")
+            c1, c2, c3 = st.columns(3)
+            scatter_pct = c1.slider("Scattered missing cells (%)", 0, 30, 5, key="lv_sc")
+            nblocks = c2.slider("Long outages (blocks)", 0, 20, 6, key="lv_nb")
+            lo, hi = c3.slider("Outage length (columns)", 1, max(2, min(W - 1, 200)),
+                               (min(30, max(1, W // 4)), min(90, max(2, W // 2))), key="lv_len")
+            seed_l = c1.number_input("Random seed", 0, 9999, 0, key="lv_seed")
+            lv_blend = c2.checkbox("Post-fill blend", value=True, key="lv_blend")
+            use_custom = c3.checkbox("Also hide one block I choose", key="lv_cb")
+            custom = None
+            if use_custom:
+                d1, d2, d3, d4 = st.columns(4)
+                r0 = d1.number_input("Row from", 1, H, min(10, H), key="lv_r0")
+                r1 = d2.number_input("Row to", 1, H, min(12, H), key="lv_r1")
+                k0 = d3.number_input("Column from", 1, W, min(100, W), key="lv_c0")
+                k1 = d4.number_input("Column to", 1, W, min(140, W), key="lv_c1")
+                custom = (int(min(r0, r1)), int(max(r0, r1)), int(min(k0, k1)), int(max(k0, k1)))
+
+            sig = hashlib.sha1(repr((hashlib.sha1(live_data).hexdigest(), scatter_pct, nblocks, lo, hi,
+                                     int(seed_l), custom, lv_blend)).encode()).hexdigest()
+            if st.button("1️⃣ Hide cells", type="primary", key="lv_hide"):
+                st.session_state["lv_hidden"] = sig
+                st.session_state.pop("lv_done", None)
+            if st.session_state.get("lv_hidden") != sig:
+                st.info("Set what to hide, then press **1️⃣ Hide cells**. Changing any setting starts over.")
+            else:
+                truth_m, mask_m, res = live_test(live_data, ",", scatter_pct / 100.0, nblocks, lo, hi,
+                                                  int(seed_l), custom, lv_blend)
+                n_hid = int(mask_m.sum())
+                st.markdown("### 📋 Scanned Data (what the engine is given)")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Cells hidden", n_hid)
+                m2.metric("Share hidden", f"{100 * n_hid / mask_m.size:.1f}%")
+                m3.metric("Cells recorded", int(mask_m.size - n_hid))
+                shown = _labelled(np.where(mask_m, np.nan, truth_m), row_lab, col_lab)
+                miss = _labelled(mask_m.astype(bool), row_lab, col_lab)
+                scan_preview(shown, miss)
+                st.caption("Red cells show None: they are hidden from the engine.")
+                if st.button("2️⃣ Repair the hidden cells", type="primary", key="lv_go"):
+                    st.session_state["lv_done"] = sig
+                if st.session_state.get("lv_done") == sig:
+                    st.success("Reconstruction Complete!")
+                    sc = pd.DataFrame(res["scores"])
+                    g = sc.iloc[0]
+                    best_other = sc.iloc[1:]["Mean abs. error"].min()
+                    k1_, k2_, k3_ = st.columns(3)
+                    k1_.metric("Hidden cells filled", f"{res['n_filled']} of {res['n_hidden']}")
+                    k2_.metric("Engine mean abs. error", f"{g['Mean abs. error']:.3f}")
+                    k3_.metric("Best simple method", f"{best_other:.3f}")
+                    st.markdown("### ✨ Repaired Output Preview")
+                    preview(_labelled(res["repaired"], row_lab, col_lab), _labelled(mask_m.astype(bool), row_lab, col_lab))
+                    st.caption("Green cells were filled by the engine. Recorded cells are unchanged.")
+                    st.markdown("### 🎯 Accuracy against the true values")
+                    st.dataframe(sc.style.format({"Mean abs. error": "{:.3f}", "RMSE": "{:.3f}",
+                                                  "Seconds": "{:.2f}"}), width="stretch", hide_index=True)
+                    if g["Mean abs. error"] < best_other:
+                        st.caption("On this run the engine's error is lower than the best simple method. "
+                                   "Results vary with what you hide: short, scattered gaps are easy for "
+                                   "linear interpolation, long outages are where the engine helps most.")
+                    else:
+                        st.caption("On this run the engine did not beat the best simple method. That is "
+                                   "expected for short or scattered gaps; try longer outages.")
+                    err = np.where(mask_m, np.abs(res["repaired"] - truth_m), np.nan)
+                    vmin, vmax = float(truth_m.min()), float(truth_m.max())
+                    fig, axs = plt.subplots(4, 1, figsize=(12, 9))
+                    heat(axs[0], truth_m, "Truth (answer key)", vmin, vmax)
+                    heat(axs[1], np.where(mask_m, np.nan, truth_m), "Given to the engine", vmin, vmax)
+                    heat(axs[2], res["repaired"], "Repaired", vmin, vmax)
+                    im = axs[3].imshow(err, cmap="magma", interpolation="nearest", aspect="auto")
+                    axs[3].set_title("Absolute error on hidden cells", fontsize=10)
+                    axs[3].set_xticks([]); axs[3].set_yticks([])
+                    fig.colorbar(im, ax=axs[3], fraction=0.02)
+                    for a_ in axs[:3]:
+                        a_.set_aspect("auto")
+                    fig.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+                    st.download_button("Download repaired CSV", core.matrix_to_csv(res["repaired"]),
+                                       "repaired.csv", "text/csv", key="lv_dl")
+                    with st.expander("Show the answer key (true values)"):
+                        st.dataframe(_labelled(truth_m, row_lab, col_lab), width="stretch")
+                else:
+                    st.info("Now press **2️⃣ Repair the hidden cells**.")
 
 # ---------------------------------------------------------------------------
 # Tab 2: 2D demo with known truth

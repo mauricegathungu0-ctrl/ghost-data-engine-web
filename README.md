@@ -95,3 +95,24 @@ real-data results. Hidden values are never given to any method; they are used on
 
 It does not recover true hidden values. It produces auditable estimates, and the confidence score is a
 heuristic: use the P95 error from the calibration report, not the score itself, as an error margin.
+
+## Live accuracy test (best for demos)
+
+The **🎯 Live accuracy test** tab starts from a complete dataset (the built-in Machakos daily temperature
+file, or your own complete numeric CSV), lets you choose what to hide (scattered cells, long outages, or one
+block you pick), shows the scan with `None` cells, repairs them with the real engine, and scores the result
+against the true values and against two simple baselines. The engine only ever sees the recorded cells.
+
+Command-line version of the same test: `python make_demo_data.py sample_data/machakos_temperature_complete.csv --bmin 30 --bmax 90`
+
+## Demo files
+
+`demo_files/` holds the Machakos daily temperature data (35 years x 365 days, NASA POWER) ready for the demo:
+
+| File | Use |
+|---|---|
+| `machakos_with_missing_heavy.csv` | Upload in **Repair my CSV** (Grid mode). About 22% of cells hidden, with long outages. |
+| `machakos_with_missing.csv` | Same, about 10% hidden. |
+| `machakos_complete_answer_key.csv` | The complete original, used to check the repaired values. |
+
+Row labels (years) and headings (dates) are kept and never repaired.
